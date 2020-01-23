@@ -214,7 +214,8 @@ cp usr_local_moran/* /usr/local/moran
 * udict.txt는 사용자 기분서-사전입니다. 띄어쓰기 단위인 어절에 대한 분석 결과를 등록할 수 있습니다.
 * uentity.txt는 사용자 명칭어 사전입니다. 현재버젼에서는 제공되지 않는 기능이므로, 그대로 두시면 됩니다.
 
-```python
+```
+python
 >>> import moran
 >>> moran_tokenizer = moran.MoranTokenizer()
 >>> x = '한국어 BERT를 공개합니다.'
@@ -233,7 +234,22 @@ cp usr_local_moran/* /usr/local/moran
 ### KorQuAD 1.0 학습과 추론
 
 * 구글의 Code를 일부 수정하였습니다. 
+* 아래와 같은 결과를 보신다면 정상적으로 작동하는 것으로 보입니다.
 
+```
+   $ python src/run_korquad_1.0.py --init_checkpoint=HanBert-54kN/HanBert-54kN --bert_config_file=HanBert-54kN/HanBert-54kN/bert_config.json --vocab_file=HanBert-54kN/HanBert-54kN/vocab_54k.txt --do_train=true --do_predict=true --train_batch_size=16 --num_train_epochs=5.0 --learning_rate=3e-5 --train_file=KorQuAD_v1.0_train.json --predict_file=KorQuAD_v1.0_dev.json --output_dir=54kN-result
+   $ time python src/run_korquad_1.0.py --init_checkpoint=HanBert-54kN/HanBert-54kN-IP --bert_config_file=HanBert-54kN/HanBert-54kN-IP/bert_config.json --vocab_file=HanBert-54kN/HanBert-54kN-IP/vocab_54k.txt --do_train=true --do_predict=true --train_batch_size=16 --num_train_epochs=5.0 --learning_rate=3e-5 --train_file=KorQuAD_v1.0_train.json --predict_file=KorQuAD_v1.0_dev.json --output_dir=54kN-IP-result
+   real	130m5.984s
+   user	54m54.364s
+   sys	28m56.004s
+
+   $ python evaluate-v1.0.py KorQuAD_v1.0_dev.json 54kN-result/predictions.json
+   EM = 83.495     F1 = 93.146 
+
+   $ python evaluate-v1.0.py KorQuAD_v1.0_dev.json 54kN-IP-result/predictions.json
+   EM = 81.902     F1 = 92.026 
+
+   ```
 
 ### HanBert-54kN의 추가 학습
 
