@@ -1,5 +1,10 @@
 # HanBert-54kN
 
+---
+
+### Model & Code Download
+
+  * https://twoblockai.com/2020/01/22/hanbert%eb%a5%bc-%ea%b3%b5%ea%b0%9c%ed%95%a9%eb%8b%88%eb%8b%a4/
 
 ---
 
