@@ -33,6 +33,12 @@ import tokenization
 import six
 import tensorflow as tf
 
+import logging
+logging.getLogger('tensorflow').disabled = True
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+import warnings
+warnings.filterwarnings("ignore")
+
 flags = tf.flags
 
 FLAGS = flags.FLAGS
@@ -158,6 +164,22 @@ flags.DEFINE_float(
     "null_score_diff_threshold", 0.0,
     "If null_score - best_non_null is greater than the threshold predict null.")
 
+tf.flags.DEFINE_bool(
+    "korquad_refine_answer_by_pos", False,
+    "korquad_refine_answer_by_pos")
+
+tf.flags.DEFINE_bool(
+    "interact", False,
+    "to Initiate interactive question and answers chatbot")
+
+tf.flags.DEFINE_string(
+    "context", None,
+    "context file path of Text summary to feed the BERT model ")
+
+tf.flags.DEFINE_string(
+    "question", None,
+    "Questioning sentence for the Text summary  ")
+
 class SquadExample(object):
   """A single training/test example for simple sequence classification.
      For examples without an answer, the start and end position are -1.
@@ -259,10 +281,13 @@ def normalize_chars(raw_text) :
     cleansed += str(c)
   return cleansed
 
-def read_squad_examples(input_file, is_training):
+def read_squad_examples(is_training, data=None, input_file=None):
   """Read a SQuAD json file into a list of SquadExample."""
-  with tf.gfile.Open(input_file, "r") as reader:
-    input_data = json.load(reader)["data"]
+  if FLAGS.context != None and FLAGS.interact==True:
+    input_data = data['data']
+  else:
+    with tf.gfile.Open(input_file, "r") as reader:
+      input_data = json.load(reader)["data"]
 
   def is_whitespace(c):
     if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
@@ -696,8 +721,8 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
                       output_nbest_file, output_null_log_odds_file, tokenizer):
   """Write final predictions to the json file and log-odds of null if needed."""
 
-  tf.logging.info("Writing predictions to: %s" % (output_prediction_file))
-  tf.logging.info("Writing nbest to: %s" % (output_nbest_file))
+#  tf.logging.info("Writing predictions to: %s" % (output_prediction_file))
+#  tf.logging.info("Writing nbest to: %s" % (output_nbest_file))
 
   example_index_to_features = collections.defaultdict(list)
   for feature in all_features:
@@ -814,6 +839,7 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
 
         if final_text in seen_predictions:
           continue
+
         seen_predictions[final_text] = True
 
       else:
@@ -876,6 +902,9 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
         all_predictions[example.qas_id] = best_non_null_entry.text
 
     all_nbest_json[example.qas_id] = nbest_json
+
+  if FLAGS.interact:
+    return all_predictions
 
   with tf.gfile.GFile(output_prediction_file, "w") as writer:
     writer.write(json.dumps(all_predictions, indent=4) + "\n")
@@ -1002,7 +1031,169 @@ def validate_flags_or_throw(bert_config):
         "The max_seq_length (%d) must be greater than max_query_length "
         "(%d) + 3" % (FLAGS.max_seq_length, FLAGS.max_query_length))
 
+
+def initializingModels():
+#     tf.logging.set_verbosity(tf.logging.INFO)
+
+    bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
+
+    #validate_flags_or_throw(bert_config)
+
+    tf.gfile.MakeDirs(FLAGS.output_dir)
+
+    mogan_tokenizer = tokenization.FullTokenizer(
+          vocab_file=FLAGS.vocab_file, do_lower_case=FLAGS.do_lower_case, use_moran=True)
+
+    basic_tokenizer = tokenization.BasicTokenizer(use_moran=False)
+
+    tpu_cluster_resolver = None
+    if FLAGS.use_tpu and FLAGS.tpu_name:
+        tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
+            FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
+
+
+    is_per_host = tf.contrib.tpu.InputPipelineConfig.PER_HOST_V2
+    run_config = tf.contrib.tpu.RunConfig(
+          cluster=tpu_cluster_resolver,
+          master=FLAGS.master,
+          model_dir=FLAGS.output_dir,
+          save_checkpoints_steps=FLAGS.save_checkpoints_steps,
+          tpu_config=tf.contrib.tpu.TPUConfig(
+              iterations_per_loop=FLAGS.iterations_per_loop,
+              num_shards=FLAGS.num_tpu_cores,
+              per_host_input_for_training=is_per_host))
+    return bert_config, run_config, mogan_tokenizer, basic_tokenizer
+
+
+def model_definition(bert_config, run_config):
+    train_examples = None
+    num_train_steps = None
+    num_warmup_steps = None
+    if FLAGS.do_train:
+        train_examples = read_squad_examples(
+            input_file=FLAGS.train_file, is_training=True)
+        num_train_steps = int(
+            len(train_examples) / FLAGS.train_batch_size * FLAGS.num_train_epochs)
+        num_warmup_steps = int(num_train_steps * FLAGS.warmup_proportion)
+
+        # Pre-shuffle the input to avoid having to make a very large shuffle
+        # buffer in in the `input_fn`.
+        rng = random.Random(12345)
+        rng.shuffle(train_examples)
+
+    model_fn = model_fn_builder(
+          bert_config=bert_config,
+          init_checkpoint=FLAGS.init_checkpoint,
+          learning_rate=FLAGS.learning_rate,
+          num_train_steps=num_train_steps,
+          num_warmup_steps=num_warmup_steps,
+          use_tpu=FLAGS.use_tpu,
+          use_one_hot_embeddings=FLAGS.use_tpu)
+
+    # If TPU is not available, this will fall back to normal Estimator on CPU
+    # or GPU.
+    estimator = tf.contrib.tpu.TPUEstimator(
+          use_tpu=FLAGS.use_tpu,
+          model_fn=model_fn,
+          config=run_config,
+          train_batch_size=FLAGS.train_batch_size,
+          predict_batch_size=FLAGS.predict_batch_size)
+    return model_fn, estimator
+
+
+def testing_model(eval_examples, tokenizer, estimator):
+    eval_writer = FeatureWriter(
+        filename=os.path.join(FLAGS.output_dir, "eval.tf_record"),
+        is_training=False)
+    eval_features = []
+
+
+    def append_feature(feature):
+      eval_features.append(feature)
+      eval_writer.process_feature(feature)
+
+
+    convert_examples_to_features(
+        examples=eval_examples,
+        tokenizer=tokenizer,
+        max_seq_length=FLAGS.max_seq_length,
+        doc_stride=FLAGS.doc_stride,
+        max_query_length=FLAGS.max_query_length,
+        is_training=False,
+        output_fn=append_feature)
+    eval_writer.close()
+
+
+#     tf.logging.info("***** Running predictions *****")
+#     tf.logging.info("  Num orig examples = %d", len(eval_examples))
+#     tf.logging.info("  Num split examples = %d", len(eval_features))
+#     tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+
+    all_results = []
+
+    predict_input_fn = input_fn_builder(
+        input_file=eval_writer.filename,
+        seq_length=FLAGS.max_seq_length,
+        is_training=False,
+        drop_remainder=False)
+
+    # If running eval on the TPU, you will need to specify the number of
+    # steps.
+    all_results = []
+#   t1 = time.time()
+    for result in estimator.predict(
+        predict_input_fn, yield_single_examples=True):
+#       print(time.time() - t1)
+#       if len(all_results) % 1000 == 0:
+#         tf.logging.info("Processing example: %d" % (len(all_results)))
+      unique_id = int(result["unique_ids"])
+      start_logits = [float(x) for x in result["start_logits"].flat]
+      end_logits = [float(x) for x in result["end_logits"].flat]
+      all_results.append(
+          RawResult(
+              unique_id=unique_id,
+              start_logits=start_logits,
+              end_logits=end_logits))
+    return eval_features, all_results
+
+
+def PredictAnswer(ContextSummary, question, mogan_tokenizer, basic_tokenizer, estimator):
+    data = {'data': [{'title': 'Random',
+           'paragraphs': [{'context': ContextSummary,
+             'qas': [{'answers': [],
+               'question': question,
+               'id': '56be4db0acb8001400a502ec'}]}]}],
+         'version': 'KorQuAD_v1.0_dev'}
+    FLAGS.interact = True
+    eval_examples = read_squad_examples(data = data, is_training=False)
+    eval_features, all_results = testing_model(eval_examples, mogan_tokenizer, estimator)
+    output_prediction_file = os.path.join(FLAGS.output_dir, "predictions.json")
+    output_nbest_file = os.path.join(FLAGS.output_dir, "nbest_predictions.json")
+    output_null_log_odds_file = os.path.join(FLAGS.output_dir, "null_odds.json")
+    Prediction = write_predictions(eval_examples, eval_features, all_results,
+                      FLAGS.n_best_size, FLAGS.max_answer_length,
+                      FLAGS.do_lower_case, output_prediction_file,
+                      output_nbest_file, output_null_log_odds_file, basic_tokenizer)
+
+    return list(Prediction.values())[0]
+
+
 def main(argv):
+
+  if FLAGS.question != None:
+    bert_config, run_config, mogan_tokenizer, basic_tokenizer = initializingModels()
+    model_fn, estimator = model_definition(bert_config, run_config)
+
+    if FLAGS.context.endswith('.txt'):
+      with open(FLAGS.context,'r') as file:
+        context = file.read()
+    else:
+        context = FLAGS.context
+
+    Answer = PredictAnswer(context, FLAGS.question, mogan_tokenizer, basic_tokenizer, estimator)
+    print(Answer)
+    return
+
   tf.logging.set_verbosity(tf.logging.INFO)
 
   bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
